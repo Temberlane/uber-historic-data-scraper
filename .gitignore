@@ -1,0 +1,11 @@
+.env
+data/rides.csv
+data/config.json
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+node_modules/
+frontend/dist/
+.DS_Store
