@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import MapPicker from "./MapPicker";
 
 const styles = {
   form: { display: "flex", flexDirection: "column", gap: "0.9rem" },
@@ -62,7 +63,6 @@ export default function Settings({ config, onSave }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  // Sync when parent config changes (e.g. after initial load)
   useEffect(() => {
     setForm({ ...config });
   }, [config]);
@@ -73,15 +73,23 @@ export default function Settings({ config, onSave }) {
     setSaved(false);
   };
 
+  const handleOriginChange = (lat, lng) => {
+    setForm((f) => ({ ...f, start_latitude: lat, start_longitude: lng }));
+    setSaved(false);
+  };
+
+  const handleDestChange = (lat, lng) => {
+    setForm((f) => ({ ...f, end_latitude: lat, end_longitude: lng }));
+    setSaved(false);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSaving(true);
     setErrors({});
     setSaved(false);
-
     const result = await onSave(form);
     setSaving(false);
-
     if (result.ok) {
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -92,52 +100,27 @@ export default function Settings({ config, onSave }) {
 
   return (
     <form style={styles.form} onSubmit={handleSubmit}>
-      {/* Origin */}
+      {/* Route map picker */}
       <div style={styles.section}>
-        <p style={styles.sectionTitle}>Start location</p>
-        <div style={styles.row}>
-          <Field
-            label="Latitude"
-            name="start_latitude"
-            value={form.start_latitude ?? ""}
-            onChange={handleChange}
-            error={errors.start_latitude}
-            step="0.0001"
-          />
-          <Field
-            label="Longitude"
-            name="start_longitude"
-            value={form.start_longitude ?? ""}
-            onChange={handleChange}
-            error={errors.start_longitude}
-            step="0.0001"
-          />
-        </div>
-      </div>
-
-      <hr style={styles.divider} />
-
-      {/* Destination */}
-      <div style={styles.section}>
-        <p style={styles.sectionTitle}>End location</p>
-        <div style={styles.row}>
-          <Field
-            label="Latitude"
-            name="end_latitude"
-            value={form.end_latitude ?? ""}
-            onChange={handleChange}
-            error={errors.end_latitude}
-            step="0.0001"
-          />
-          <Field
-            label="Longitude"
-            name="end_longitude"
-            value={form.end_longitude ?? ""}
-            onChange={handleChange}
-            error={errors.end_longitude}
-            step="0.0001"
-          />
-        </div>
+        <p style={styles.sectionTitle}>Route</p>
+        <MapPicker
+          originLat={form.start_latitude}
+          originLng={form.start_longitude}
+          destLat={form.end_latitude}
+          destLng={form.end_longitude}
+          onOriginChange={handleOriginChange}
+          onDestChange={handleDestChange}
+        />
+        {(errors.start_latitude || errors.start_longitude) && (
+          <span style={styles.errorText}>
+            Invalid origin: {errors.start_latitude || errors.start_longitude}
+          </span>
+        )}
+        {(errors.end_latitude || errors.end_longitude) && (
+          <span style={styles.errorText}>
+            Invalid destination: {errors.end_latitude || errors.end_longitude}
+          </span>
+        )}
       </div>
 
       <hr style={styles.divider} />

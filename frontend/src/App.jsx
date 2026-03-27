@@ -4,8 +4,59 @@ import PriceChart from "./components/PriceChart";
 import DataTable from "./components/DataTable";
 import Settings from "./components/Settings";
 
-const POLL_INTERVAL_MS = 60_000; // refresh data every 60 s
+const POLL_INTERVAL_MS = 60_000;
 
+// ---------------------------------------------------------------------------
+// Mock data (48 half-hour slots across a full day, 3 products, rush-hour surge)
+// ---------------------------------------------------------------------------
+function buildMockData() {
+  const products = [
+    { id: "uberpool", name: "UberPool", base: 7, spread: 1.5 },
+    { id: "uberx", name: "UberX", base: 11, spread: 2.5 },
+    { id: "uberxl", name: "UberXL", base: 17, spread: 3.5 },
+  ];
+
+  // Seeded-ish noise via a simple LCG so the chart looks the same on reload
+  let seed = 42;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) & 0xffffffff;
+    return (seed >>> 0) / 4294967296;
+  };
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const rows = [];
+
+  for (let i = 0; i < 48; i++) {
+    const ts = new Date(today.getTime() + i * 30 * 60 * 1000);
+    const hour = ts.getHours();
+    const isRush = (hour >= 7 && hour <= 9) || (hour >= 17 && hour <= 19);
+    const surge = isRush ? 1.4 + rand() * 0.2 : 1.0 + rand() * 0.05;
+
+    for (const p of products) {
+      const low = Math.max(4, p.base * surge + (rand() - 0.5) * 2);
+      const high = low + p.spread * (0.8 + rand() * 0.4);
+      rows.push({
+        timestamp: ts.toISOString(),
+        product_id: p.id,
+        display_name: p.name,
+        low_estimate: low.toFixed(2),
+        high_estimate: high.toFixed(2),
+        surge_multiplier: surge.toFixed(2),
+        distance: "12.3",
+        duration: "25",
+      });
+    }
+  }
+
+  return rows.reverse(); // newest-first to match API
+}
+
+const MOCK_DATA = buildMockData();
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 const styles = {
   app: {
     fontFamily: "'Segoe UI', system-ui, sans-serif",
@@ -48,14 +99,23 @@ const styles = {
     gap: "1rem",
     marginBottom: "1rem",
     flexWrap: "wrap",
+    alignItems: "center",
   },
   badge: (color) => ({
     padding: "0.25rem 0.75rem",
     borderRadius: 20,
     fontSize: "0.8rem",
     fontWeight: 600,
-    background: color === "green" ? "#d1fae5" : color === "red" ? "#fee2e2" : "#e5e7eb",
-    color: color === "green" ? "#065f46" : color === "red" ? "#991b1b" : "#374151",
+    background:
+      color === "green" ? "#d1fae5"
+      : color === "red" ? "#fee2e2"
+      : color === "yellow" ? "#fef9c3"
+      : "#e5e7eb",
+    color:
+      color === "green" ? "#065f46"
+      : color === "red" ? "#991b1b"
+      : color === "yellow" ? "#713f12"
+      : "#374151",
   }),
   scrapeBtn: {
     padding: "0.45rem 1rem",
@@ -68,13 +128,34 @@ const styles = {
     cursor: "pointer",
     marginLeft: "auto",
   },
-  errorMsg: {
-    color: "#b91c1c",
+  warningBanner: {
+    background: "#fef3c7",
+    border: "1px solid #fde68a",
+    borderRadius: 8,
+    padding: "0.6rem 1rem",
     fontSize: "0.85rem",
-    marginTop: "0.5rem",
+    color: "#92400e",
+    marginBottom: "1rem",
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+  },
+  retryBtn: {
+    marginLeft: "auto",
+    padding: "0.25rem 0.75rem",
+    border: "none",
+    borderRadius: 6,
+    background: "#d97706",
+    color: "#fff",
+    fontWeight: 600,
+    fontSize: "0.78rem",
+    cursor: "pointer",
   },
 };
 
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
 export default function App() {
   const [data, setData] = useState([]);
   const [config, setConfig] = useState(null);
@@ -82,8 +163,6 @@ export default function App() {
   const [scraping, setScraping] = useState(false);
   const [scrapeMsg, setScrapeMsg] = useState("");
   const [loadError, setLoadError] = useState("");
-
-  // ---- data fetching -------------------------------------------------------
 
   const fetchAll = useCallback(async () => {
     try {
@@ -96,8 +175,8 @@ export default function App() {
       setConfig(configRes.data);
       setStatus(statusRes.data);
       setLoadError("");
-    } catch (err) {
-      setLoadError("Could not reach the backend. Is the Flask server running?");
+    } catch {
+      setLoadError("Could not reach the backend — showing mock data.");
     }
   }, []);
 
@@ -106,8 +185,6 @@ export default function App() {
     const timer = setInterval(fetchAll, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [fetchAll]);
-
-  // ---- manual scrape -------------------------------------------------------
 
   const handleScrapeNow = async () => {
     setScraping(true);
@@ -123,8 +200,6 @@ export default function App() {
     }
   };
 
-  // ---- config save ---------------------------------------------------------
-
   const handleSaveConfig = async (newConfig) => {
     try {
       const res = await axios.post("/api/config", newConfig);
@@ -135,20 +210,20 @@ export default function App() {
     }
   };
 
-  // ---- render --------------------------------------------------------------
+  // Use real data when available, otherwise fall back to mock
+  const displayData = data.length > 0 ? data : MOCK_DATA;
+  const usingMock = data.length === 0;
 
-  if (loadError) {
-    return (
-      <div style={styles.app}>
-        <div style={{ ...styles.card, marginTop: "3rem", textAlign: "center" }}>
-          <p style={{ fontSize: "1.1rem", color: "#b91c1c" }}>{loadError}</p>
-          <button style={styles.scrapeBtn} onClick={fetchAll}>
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // Fallback config for display when backend is unavailable
+  const displayConfig = config ?? {
+    start_latitude: 37.7749,
+    start_longitude: -122.4194,
+    end_latitude: 37.3382,
+    end_longitude: -121.8863,
+    start_time: "07:00",
+    end_time: "09:00",
+    interval_minutes: 1,
+  };
 
   return (
     <div style={styles.app}>
@@ -161,22 +236,35 @@ export default function App() {
         </div>
       </div>
 
+      {/* Backend warning banner */}
+      {loadError && (
+        <div style={styles.warningBanner}>
+          <span>⚠️ {loadError}</span>
+          <button style={styles.retryBtn} onClick={fetchAll}>
+            Retry
+          </button>
+        </div>
+      )}
+
       {/* Status bar */}
       <div style={styles.statusBar}>
-        {status && (
+        {status ? (
           <>
             <span style={styles.badge(status.running ? "green" : "red")}>
               {status.running ? "● Scheduler running" : "● Scheduler stopped"}
             </span>
-            <span style={styles.badge("gray")}>
-              Every {status.interval_minutes} min
-            </span>
+            <span style={styles.badge("gray")}>Every {status.interval_minutes} min</span>
             {status.next_run && (
               <span style={styles.badge("gray")}>
                 Next: {new Date(status.next_run).toLocaleTimeString()}
               </span>
             )}
           </>
+        ) : (
+          <span style={styles.badge("gray")}>● No backend</span>
+        )}
+        {usingMock && (
+          <span style={styles.badge("yellow")}>Mock data</span>
         )}
         <button
           style={{ ...styles.scrapeBtn, opacity: scraping ? 0.6 : 1 }}
@@ -186,30 +274,39 @@ export default function App() {
           {scraping ? "Scraping…" : "Scrape Now"}
         </button>
       </div>
-      {scrapeMsg && <p style={styles.errorMsg}>{scrapeMsg}</p>}
+      {scrapeMsg && (
+        <p style={{ color: "#b91c1c", fontSize: "0.85rem", marginTop: "0.5rem" }}>
+          {scrapeMsg}
+        </p>
+      )}
 
       {/* Main grid */}
       <div style={styles.grid}>
         {/* Left column */}
         <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
           <div style={styles.card}>
-            <h2 style={styles.cardTitle}>Price Over Time</h2>
-            <PriceChart data={data} />
+            <h2 style={styles.cardTitle}>
+              Price Over Time
+              {usingMock && (
+                <span style={{ fontWeight: 400, fontSize: "0.78rem", color: "#9ca3af", marginLeft: 8 }}>
+                  (mock — scroll to see full day)
+                </span>
+              )}
+            </h2>
+            <PriceChart data={displayData} />
           </div>
           <div style={styles.card}>
-            <h2 style={styles.cardTitle}>Recent Estimates ({data.length} rows)</h2>
-            <DataTable data={data} />
+            <h2 style={styles.cardTitle}>
+              Recent Estimates ({displayData.length} rows)
+            </h2>
+            <DataTable data={displayData} />
           </div>
         </div>
 
         {/* Right column – settings */}
         <div style={styles.card}>
           <h2 style={styles.cardTitle}>Settings</h2>
-          {config ? (
-            <Settings config={config} onSave={handleSaveConfig} />
-          ) : (
-            <p style={{ color: "#6e6e73", fontSize: "0.9rem" }}>Loading…</p>
-          )}
+          <Settings config={displayConfig} onSave={handleSaveConfig} />
         </div>
       </div>
     </div>
