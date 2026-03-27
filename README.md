@@ -1,7 +1,12 @@
 # uber-historic-data-scraper
 
-> A Python scraper + React dashboard that tracks Uber price estimates over
-> time so you can see when your commute gets hit by surge pricing.
+> *"i am spending too much money on uber and I can see the historic data…*
+> *MY PRICING SURGED FROM 5$ to 12 THIS MORNING??"*
+>
+> — The spark that started it all 🔥
+
+A Python scraper + React dashboard that tracks Uber price estimates over
+time so you can see when your commute gets hit by surge pricing.
 
 ---
 
