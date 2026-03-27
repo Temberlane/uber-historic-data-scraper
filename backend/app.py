@@ -73,22 +73,37 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 # ---------------------------------------------------------------------------
 
 scheduler = BackgroundScheduler(daemon=True)
-_current_interval: int = 1  # minutes
+_current_interval: int = 5  # minutes (midpoint of 4-6 min range)
+
+# Randomised interval bounds (seconds)
+_INTERVAL_MIN_SEC = 4 * 60   # 240 s
+_INTERVAL_MAX_SEC = 6 * 60   # 360 s
 
 
 def _reschedule(interval_minutes: int) -> None:
-    """Replace the existing scrape job with a new interval."""
+    """Replace the existing scrape job.
+
+    The job fires every ``interval_minutes`` minutes with ±1 minute of
+    random jitter so consecutive fetches are spread between
+    (interval_minutes − 1) and (interval_minutes + 1) minutes apart.
+    When the default 5-minute interval is used this produces a 4-6 min
+    randomised cadence.
+    """
     global _current_interval
     scheduler.remove_all_jobs()
     scheduler.add_job(
         scrape_once,
         trigger="interval",
         minutes=interval_minutes,
+        jitter=60,          # adds 0–60 s on top of the interval
         id="scrape_job",
         replace_existing=True,
     )
     _current_interval = interval_minutes
-    log.info("Scraper rescheduled to every %d minute(s).", interval_minutes)
+    log.info(
+        "Scraper rescheduled: every %d min ±1 min (jitter=60 s).",
+        interval_minutes,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -228,10 +243,13 @@ if __name__ == "__main__":
     if not CONFIG_FILE.exists():
         save_config(DEFAULT_CONFIG)
 
-    interval = max(1, int(config.get("interval_minutes", 1)))
+    interval = max(1, int(config.get("interval_minutes", 5)))
     _reschedule(interval)
     scheduler.start()
-    log.info("APScheduler started. First scrape will run in %d minute(s).", interval)
+    log.info(
+        "APScheduler started. Scraping every %d min ±1 min (randomised).",
+        interval,
+    )
 
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "false").lower() in ("true", "1")
