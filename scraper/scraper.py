@@ -175,7 +175,11 @@ def _scrape_web_prices() -> list[dict]:
         estimates = _parse_soup_prices(soup)
 
     except Exception as exc:  # noqa: BLE001
-        log.error("Selenium error: %s", exc)
+        log.error(
+            "Selenium error while scraping Uber prices (loading page or parsing product cards) [%s]: %s",
+            type(exc).__name__,
+            exc,
+        )
     finally:
         driver.quit()
 
