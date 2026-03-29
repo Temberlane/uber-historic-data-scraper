@@ -1,8 +1,8 @@
 """
 Uber Price Scraper – Web Scraping Edition
 -----------------------------------------
-Scrapes the Uber mobile product-selection page with Playwright and appends
-results to a CSV file on a configurable schedule.
+Scrapes the Uber mobile product-selection page with Selenium + BeautifulSoup
+and appends results to a CSV file on a configurable schedule.
 
 Environment variables (see .env.example):
   DATA_DIR   – Directory where rides.csv and config.json are written
@@ -78,8 +78,8 @@ DEFAULT_CONFIG = {
     "start_longitude": ROUTE_START_LNG,
     "end_latitude": ROUTE_END_LAT,
     "end_longitude": ROUTE_END_LNG,
-    "start_time": "07:00",
-    "end_time": "09:30",
+    "start_time": "06:00",
+    "end_time": "18:00",
     "interval_minutes": 5,
     "seat_count": 1,
 }
@@ -101,194 +101,140 @@ CSV_HEADERS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Web scraping via Playwright
+# Web scraping via Selenium + BeautifulSoup
 # ---------------------------------------------------------------------------
 
 
 def _scrape_web_prices() -> list[dict]:
-    """Launch a headless browser, load the Uber product-selection page,
-    intercept internal API responses, and return a list of price estimate dicts.
+    """Launch a headless Chrome browser via Selenium, load the Uber
+    product-selection page, then parse the rendered HTML with BeautifulSoup.
     """
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout  # noqa: PLC0415
+    import re  # noqa: PLC0415
 
+    from bs4 import BeautifulSoup  # noqa: PLC0415
+    from selenium import webdriver  # noqa: PLC0415
+    from selenium.common.exceptions import TimeoutException  # noqa: PLC0415
+    from selenium.webdriver.chrome.options import Options  # noqa: PLC0415
+    from selenium.webdriver.chrome.service import Service  # noqa: PLC0415
+    from selenium.webdriver.common.by import By  # noqa: PLC0415
+    from selenium.webdriver.support import expected_conditions as EC  # noqa: PLC0415
+    from selenium.webdriver.support.ui import WebDriverWait  # noqa: PLC0415
+    from webdriver_manager.chrome import ChromeDriverManager  # noqa: PLC0415
+
+    options = Options()
+    
+    # Removed --headless so you can see the browser window
+    # options.add_argument("--headless")
+    
+    # Use your local Chrome profile to keep you logged in to Uber
+    # NOTE: You MUST close all regular Google Chrome windows before running this script!
+    user_data_dir = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    options.add_argument(f"--user-data-dir={user_data_dir}")
+
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    
+    # We remove the headless and window-size arguments, and instead 
+    # we maximize the window to make it easier to view what is happening
+    options.add_argument("--start-maximized")
+    
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Version/17.0 Mobile/15E148 Safari/604.1"
+    )
+    # Suppress webdriver-manager download logs
+    options.add_experimental_option("excludeSwitches", ["enable-logging"])
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
     estimates: list[dict] = []
-    api_responses: list[tuple[str, object]] = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+    try:
+        driver.get(COMMUTE_URL)
+
+        # Wait up to 30 s for at least one product card to appear
+        card_selectors = (
+            '[data-testid*="vehicle"], [data-testid*="product"], '
+            '[class*="VehicleView"], [class*="ProductCard"], '
+            '[class*="product-card"], [class*="vehicle-card"], '
+            '[class*="RideOption"]'
         )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
-                "Version/17.0 Mobile/15E148 Safari/604.1"
-            ),
-            viewport={"width": 390, "height": 844},
-            locale="en-CA",
-        )
-        page = context.new_page()
-
-        # Capture all JSON responses from Uber domains
-        def _on_response(response):
-            if "uber.com" not in response.url:
-                return
-            content_type = response.headers.get("content-type", "")
-            if "json" not in content_type:
-                return
-            try:
-                body = response.json()
-                api_responses.append((response.url, body))
-            except Exception:
-                pass
-
-        page.on("response", _on_response)
-
         try:
-            page.goto(COMMUTE_URL, timeout=30_000, wait_until="networkidle")
-        except PWTimeout:
-            log.warning("Page load timed out – proceeding with partial data")
+            WebDriverWait(driver, 30).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, card_selectors))
+            )
+        except TimeoutException:
+            log.warning("Timed out waiting for product cards – parsing whatever loaded")
 
-        # Extra wait to let any lazy-loaded data arrive
-        page.wait_for_timeout(2_000)
+        # Extra settle time for lazy-loaded content
+        time.sleep(2)
 
-        # 1) Try to extract prices from intercepted API responses
-        for url, body in api_responses:
-            found = _parse_uber_api_response(body)
-            if found:
-                log.info("Extracted %d product(s) from API response: %s", len(found), url)
-                estimates = found
-                break
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        estimates = _parse_soup_prices(soup)
 
-        # 2) Fall back to DOM parsing if nothing was captured
-        if not estimates:
-            log.info("No API response captured – falling back to DOM parsing")
-            estimates = _parse_dom_prices(page)
-
-        browser.close()
+    except Exception as exc:  # noqa: BLE001
+        log.error("Selenium error: %s", exc)
+    finally:
+        driver.quit()
 
     return estimates
 
 
-def _parse_uber_api_response(data: object) -> list[dict]:
-    """Recursively walk a JSON payload looking for Uber product + price objects."""
-    results: list[dict] = []
-
-    def _walk(obj):
-        if isinstance(obj, dict):
-            # Heuristic: an object has a display name AND some fare info
-            name = (
-                obj.get("displayName")
-                or obj.get("name")
-                or obj.get("vehicleViewDisplayName")
-                or obj.get("title")
-            )
-            fare = obj.get("fare") or obj.get("estimate") or obj.get("fareEstimate") or {}
-            if isinstance(fare, dict):
-                low = fare.get("low") or fare.get("lowEstimate") or fare.get("minimum")
-                high = fare.get("high") or fare.get("highEstimate") or fare.get("maximum")
-                currency = fare.get("currencyCode", "CAD")
-            else:
-                low = None
-                high = None
-                currency = "CAD"
-
-            # Also check for flat price fields on the object itself
-            if not low:
-                low = obj.get("lowEstimate") or obj.get("priceMin") or obj.get("minFare")
-            if not high:
-                high = obj.get("highEstimate") or obj.get("priceMax") or obj.get("maxFare")
-            if not currency:
-                currency = obj.get("currencyCode", "CAD")
-
-            if name and (low is not None or high is not None):
-                try:
-                    low_f = float(low) if low is not None else None
-                    high_f = float(high) if high is not None else None
-                except (TypeError, ValueError):
-                    low_f = high_f = None
-
-                if low_f is not None or high_f is not None:
-                    results.append(
-                        {
-                            "product_id": obj.get("productId") or obj.get("id") or str(name).lower().replace(" ", "_"),
-                            "display_name": name,
-                            "low_estimate": low_f,
-                            "high_estimate": high_f,
-                            "surge_multiplier": float(obj.get("surgeMultiplier", 1.0)),
-                            "duration": obj.get("duration") or obj.get("durationSeconds"),
-                            "distance": obj.get("distance") or obj.get("distanceMiles"),
-                            "currency_code": currency,
-                        }
-                    )
-                    return  # Don't recurse into this node further
-
-            for value in obj.values():
-                _walk(value)
-
-        elif isinstance(obj, list):
-            for item in obj:
-                _walk(item)
-
-    _walk(data)
-    return results
-
-
-def _parse_dom_prices(page) -> list[dict]:
-    """Parse product prices directly from the rendered DOM."""
+def _parse_soup_prices(soup) -> list[dict]:
+    """Extract product names and price ranges from a BeautifulSoup document."""
     import re  # noqa: PLC0415
 
+    from bs4 import Tag  # noqa: PLC0415
+
     results: list[dict] = []
 
-    # Selectors likely to wrap individual vehicle/product cards
-    candidate_selectors = [
-        '[data-testid*="vehicle"]',
-        '[data-testid*="product"]',
-        '[class*="VehicleView"]',
-        '[class*="ProductCard"]',
-        '[class*="product-card"]',
-        '[class*="vehicle-card"]',
-        '[class*="RideOption"]',
+    # Attribute patterns that identify individual ride-option cards
+    card_attr_patterns = [
+        {"attrs": {"data-testid": re.compile(r"vehicle|product", re.I)}},
+        {"class": re.compile(r"VehicleView|ProductCard|product-card|vehicle-card|RideOption", re.I)},
     ]
 
-    for selector in candidate_selectors:
-        cards = page.query_selector_all(selector)
-        if not cards:
+    cards: list[Tag] = []
+    for attrs in card_attr_patterns:
+        found = soup.find_all(True, attrs)
+        if found:
+            cards = found
+            break
+
+    for card in cards:
+        text = card.get_text(separator=" ", strip=True)
+
+        # Match price ranges like "$12–15", "$12 - $15", "CAD 12 - 15"
+        price_match = re.search(
+            r"[\$£€]?\s*(\d+(?:\.\d+)?)\s*[-–]\s*[\$£€]?\s*(\d+(?:\.\d+)?)", text
+        )
+
+        # Product name: prefer a heading or named element
+        name_el = card.find(["h2", "h3", "h4"]) or card.find(
+            class_=re.compile(r"name|title", re.I)
+        )
+        name = name_el.get_text(strip=True) if name_el else ""
+        if not name:
+            words = text.split()
+            name = words[0] if words else ""
+
+        if not name or not price_match:
             continue
 
-        for card in cards:
-            text = card.inner_text()
-            # Match price ranges like "$12–15", "$12 - $15", "CAD 12 - 15"
-            price_match = re.search(
-                r"[\$£€]?\s*(\d+(?:\.\d+)?)\s*[-–]\s*[\$£€]?\s*(\d+(?:\.\d+)?)", text
-            )
-
-            # Try a heading element for the product name
-            name_el = card.query_selector('[class*="name"], [class*="title"], h2, h3, h4')
-            name = name_el.inner_text().strip() if name_el else ""
-            if not name:
-                lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-                name = lines[0] if lines else ""
-
-            if not name or not price_match:
-                continue
-
-            results.append(
-                {
-                    "product_id": name.lower().replace(" ", "_"),
-                    "display_name": name,
-                    "low_estimate": float(price_match.group(1)),
-                    "high_estimate": float(price_match.group(2)),
-                    "surge_multiplier": 1.0,
-                    "duration": None,
-                    "distance": None,
-                    "currency_code": "CAD",
-                }
-            )
-
-        if results:
-            break
+        results.append(
+            {
+                "product_id": name.lower().replace(" ", "_"),
+                "display_name": name,
+                "low_estimate": float(price_match.group(1)),
+                "high_estimate": float(price_match.group(2)),
+                "surge_multiplier": 1.0,
+                "duration": None,
+                "distance": None,
+                "currency_code": "CAD",
+            }
+        )
 
     return results
 
